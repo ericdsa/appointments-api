@@ -2,6 +2,7 @@ package com.example
 
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.plugins.ApiKeyAuth
 import com.example.plugins.configureRouting
 import com.example.plugins.configureSerialization
 import com.example.plugins.configureStatusPages
@@ -16,6 +17,10 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import org.koin.dsl.module
+import org.koin.ktor.plugin.Koin
+
+private const val TEST_API_KEY = "test-key"
 
 private class FakeAppointmentRepository : AppointmentRepository {
     private val store = ConcurrentHashMap<String, Appointment>()
@@ -38,18 +43,24 @@ private class FakeAppointmentRepository : AppointmentRepository {
 
 private fun ApplicationTestBuilder.setup() {
     application {
+        install(Koin) {
+            modules(module { single<AppointmentRepository> { FakeAppointmentRepository() } })
+        }
+        install(ApiKeyAuth) { apiKey = TEST_API_KEY }
         configureSerialization()
         configureStatusPages()
-        configureRouting(FakeAppointmentRepository())
+        configureRouting()
     }
 }
+
+private fun HttpRequestBuilder.apiKey() = header("X-Api-Key", TEST_API_KEY)
 
 class AppointmentRoutesTest {
 
     @Test
     fun `GET appointments returns empty list initially`() = testApplication {
         setup()
-        val response = client.get("/appointments")
+        val response = client.get("/appointments") { apiKey() }
         assertEquals(HttpStatusCode.OK, response.status)
         assertEquals("[]", response.bodyAsText().trim())
     }
@@ -57,17 +68,17 @@ class AppointmentRoutesTest {
     @Test
     fun `POST appointments creates and GET retrieves it`() = testApplication {
         setup()
-
         val body = """{"title":"Dentist","description":"Annual checkup","scheduledAt":"2026-07-01T09:00:00Z","durationMinutes":60,"attendee":"Alice"}"""
 
         val post = client.post("/appointments") {
+            apiKey()
             contentType(ContentType.Application.Json)
             setBody(body)
         }
         assertEquals(HttpStatusCode.Created, post.status)
         assertContains(post.bodyAsText(), "Dentist")
 
-        val list = client.get("/appointments")
+        val list = client.get("/appointments") { apiKey() }
         assertEquals(HttpStatusCode.OK, list.status)
         assertContains(list.bodyAsText(), "Dentist")
     }
@@ -75,8 +86,22 @@ class AppointmentRoutesTest {
     @Test
     fun `GET appointments by unknown id returns 404`() = testApplication {
         setup()
-        val response = client.get("/appointments/does-not-exist")
+        val response = client.get("/appointments/does-not-exist") { apiKey() }
         assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `missing API key returns 401`() = testApplication {
+        setup()
+        val response = client.get("/appointments")
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `wrong API key returns 403`() = testApplication {
+        setup()
+        val response = client.get("/appointments") { header("X-Api-Key", "wrong") }
+        assertEquals(HttpStatusCode.Forbidden, response.status)
     }
 
     @Test
@@ -84,6 +109,7 @@ class AppointmentRoutesTest {
         setup()
         val body = """{"title":"","description":"x","scheduledAt":"2026-07-01T09:00:00Z","durationMinutes":30,"attendee":"Bob"}"""
         val response = client.post("/appointments") {
+            apiKey()
             contentType(ContentType.Application.Json)
             setBody(body)
         }
@@ -96,6 +122,7 @@ class AppointmentRoutesTest {
         setup()
         val body = """{"title":"Meeting","description":"x","scheduledAt":"not-a-date","durationMinutes":30,"attendee":"Bob"}"""
         val response = client.post("/appointments") {
+            apiKey()
             contentType(ContentType.Application.Json)
             setBody(body)
         }
@@ -107,16 +134,17 @@ class AppointmentRoutesTest {
         setup()
         val body = """{"title":"Meeting","description":"x","scheduledAt":"2026-07-01T09:00:00Z","durationMinutes":30,"attendee":"Bob"}"""
         val post = client.post("/appointments") {
+            apiKey()
             contentType(ContentType.Application.Json)
             setBody(body)
         }
         assertEquals(HttpStatusCode.Created, post.status)
         val id = Regex(""""id"\s*:\s*"([^"]+)"""").find(post.bodyAsText())!!.groupValues[1]
 
-        val del = client.delete("/appointments/$id")
+        val del = client.delete("/appointments/$id") { apiKey() }
         assertEquals(HttpStatusCode.NoContent, del.status)
 
-        val get = client.get("/appointments/$id")
+        val get = client.get("/appointments/$id") { apiKey() }
         assertEquals(HttpStatusCode.NotFound, get.status)
     }
 }

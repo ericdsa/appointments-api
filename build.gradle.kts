@@ -18,6 +18,7 @@ repositories {
 
 val ktorVersion = "3.0.3"
 val exposedVersion = "0.56.0"
+val koinVersion = "4.0.0"
 
 dependencies {
     implementation("io.ktor:ktor-server-core:$ktorVersion")
@@ -32,6 +33,13 @@ dependencies {
     implementation("org.postgresql:postgresql:42.7.4")
     implementation("com.zaxxer:HikariCP:5.1.0")
 
+    implementation("io.insert-koin:koin-ktor:$koinVersion")
+    implementation("io.insert-koin:koin-logger-slf4j:$koinVersion")
+
+    implementation("org.flywaydb:flyway-core:10.20.1")
+    implementation("org.flywaydb:flyway-database-postgresql:10.20.1")
+
     testImplementation("io.ktor:ktor-server-test-host:$ktorVersion")
+    testImplementation("io.insert-koin:koin-test:$koinVersion")
     testImplementation(kotlin("test"))
 }
