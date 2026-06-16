@@ -1,15 +1,13 @@
 package com.example.models
 
 import kotlinx.serialization.Serializable
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
 data class Appointment(
     val id: String,
     val title: String,
     val description: String,
-    val scheduledAt: String,   // ISO 8601, e.g. "2026-06-15T10:00:00Z"
+    val scheduledAt: String,
     val durationMinutes: Int,
     val attendee: String,
 )
@@ -21,40 +19,15 @@ data class AppointmentRequest(
     val scheduledAt: String,
     val durationMinutes: Int,
     val attendee: String,
-)
-
-object AppointmentStore {
-    private val store = ConcurrentHashMap<String, Appointment>()
-
-    fun all(): List<Appointment> = store.values.toList()
-
-    fun find(id: String): Appointment? = store[id]
-
-    fun create(req: AppointmentRequest): Appointment {
-        val appointment = Appointment(
-            id = UUID.randomUUID().toString(),
-            title = req.title,
-            description = req.description,
-            scheduledAt = req.scheduledAt,
-            durationMinutes = req.durationMinutes,
-            attendee = req.attendee,
-        )
-        store[appointment.id] = appointment
-        return appointment
+) {
+    fun validate() {
+        require(title.isNotBlank()) { "title must not be blank" }
+        require(attendee.isNotBlank()) { "attendee must not be blank" }
+        require(durationMinutes > 0) { "durationMinutes must be positive" }
+        try {
+            java.time.Instant.parse(scheduledAt)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("scheduledAt must be a valid ISO 8601 instant (e.g. 2026-06-15T10:00:00Z)")
+        }
     }
-
-    fun update(id: String, req: AppointmentRequest): Appointment? {
-        val existing = store[id] ?: return null
-        val updated = existing.copy(
-            title = req.title,
-            description = req.description,
-            scheduledAt = req.scheduledAt,
-            durationMinutes = req.durationMinutes,
-            attendee = req.attendee,
-        )
-        store[id] = updated
-        return updated
-    }
-
-    fun delete(id: String): Boolean = store.remove(id) != null
 }
