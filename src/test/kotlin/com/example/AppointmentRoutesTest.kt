@@ -2,11 +2,12 @@ package com.example
 
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.models.ServiceResult
 import com.example.plugins.ApiKeyAuth
 import com.example.plugins.configureRouting
 import com.example.plugins.configureSerialization
 import com.example.plugins.configureStatusPages
-import com.example.repository.AppointmentRepository
+import com.example.service.AppointmentService
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -22,29 +23,51 @@ import org.koin.ktor.plugin.Koin
 
 private const val TEST_API_KEY = "test-key"
 
-private class FakeAppointmentRepository : AppointmentRepository {
+private class FakeAppointmentService : AppointmentService {
     private val store = ConcurrentHashMap<String, Appointment>()
 
-    override suspend fun findAll() = store.values.toList()
-    override suspend fun findById(id: String) = store[id]
-    override suspend fun create(req: AppointmentRequest): Appointment {
-        val a = Appointment(UUID.randomUUID().toString(), req.title, req.description, req.scheduledAt, req.durationMinutes, req.attendee)
-        store[a.id] = a
-        return a
+    override suspend fun getAll() = ServiceResult.Success(store.values.toList())
+
+    override suspend fun getById(id: String) =
+        store[id]?.let { ServiceResult.Success(it) } ?: ServiceResult.NotFound
+
+    override suspend fun create(req: AppointmentRequest): ServiceResult<Appointment> {
+        if (req.title.isBlank()) return ServiceResult.ValidationError("title must not be blank")
+        return try {
+            req.validate()
+            val a = Appointment(UUID.randomUUID().toString(), req.title, req.description, req.scheduledAt, req.durationMinutes, req.attendee)
+            store[a.id] = a
+            ServiceResult.Success(a)
+        } catch (e: IllegalArgumentException) {
+            ServiceResult.ValidationError(e.message ?: "Invalid request")
+        }
     }
-    override suspend fun update(id: String, req: AppointmentRequest): Appointment? {
-        val existing = store[id] ?: return null
-        val updated = existing.copy(title = req.title, description = req.description, scheduledAt = req.scheduledAt, durationMinutes = req.durationMinutes, attendee = req.attendee)
-        store[id] = updated
-        return updated
+
+    override suspend fun update(id: String, req: AppointmentRequest): ServiceResult<Appointment> {
+        val existing = store[id] ?: return ServiceResult.NotFound
+        return try {
+            req.validate()
+            val updated = existing.copy(title = req.title, description = req.description, scheduledAt = req.scheduledAt, durationMinutes = req.durationMinutes, attendee = req.attendee)
+            store[id] = updated
+            ServiceResult.Success(updated)
+        } catch (e: IllegalArgumentException) {
+            ServiceResult.ValidationError(e.message ?: "Invalid request")
+        }
     }
-    override suspend fun delete(id: String) = store.remove(id) != null
+
+    override suspend fun reschedule(id: String, req: AppointmentRequest): ServiceResult<Appointment> {
+        store.remove(id) ?: return ServiceResult.NotFound
+        return create(req)
+    }
+
+    override suspend fun delete(id: String) =
+        if (store.remove(id) != null) ServiceResult.Success(Unit) else ServiceResult.NotFound
 }
 
 private fun ApplicationTestBuilder.setup() {
     application {
         install(Koin) {
-            modules(module { single<AppointmentRepository> { FakeAppointmentRepository() } })
+            modules(module { single<AppointmentService> { FakeAppointmentService() } })
         }
         install(ApiKeyAuth) { apiKey = TEST_API_KEY }
         configureSerialization()
@@ -146,5 +169,26 @@ class AppointmentRoutesTest {
 
         val get = client.get("/appointments/$id") { apiKey() }
         assertEquals(HttpStatusCode.NotFound, get.status)
+    }
+
+    @Test
+    fun `POST reschedule returns rescheduled appointment`() = testApplication {
+        setup()
+        val body = """{"title":"Meeting","description":"x","scheduledAt":"2026-07-01T09:00:00Z","durationMinutes":30,"attendee":"Bob"}"""
+        val post = client.post("/appointments") {
+            apiKey()
+            contentType(ContentType.Application.Json)
+            setBody(body)
+        }
+        val id = Regex(""""id"\s*:\s*"([^"]+)"""").find(post.bodyAsText())!!.groupValues[1]
+
+        val rescheduleBody = """{"title":"Meeting","description":"x","scheduledAt":"2026-08-01T10:00:00Z","durationMinutes":30,"attendee":"Bob"}"""
+        val reschedule = client.post("/appointments/$id/reschedule") {
+            apiKey()
+            contentType(ContentType.Application.Json)
+            setBody(rescheduleBody)
+        }
+        assertEquals(HttpStatusCode.OK, reschedule.status)
+        assertContains(reschedule.bodyAsText(), "2026-08-01T10:00:00Z")
     }
 }

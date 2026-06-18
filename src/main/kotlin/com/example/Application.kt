@@ -16,10 +16,12 @@ fun main(args: Array<String>): Unit = EngineMain.main(args)
 fun Application.module() {
     val database = connectDatabase()
     val apiKey = environment.config.property("auth.apiKey").getString()
+    val notificationBaseUrl = environment.config.propertyOrNull("notification.baseUrl")?.getString()
+        ?: "http://localhost:9000"
 
     install(Koin) {
         slf4jLogger()
-        modules(appointmentModule(database))
+        modules(appointmentModule(database, notificationBaseUrl))
     }
 
     install(ApiKeyAuth) {
