@@ -1,14 +1,14 @@
 package com.example.plugins
 
-import com.example.repository.AppointmentRepository
 import com.example.routes.appointmentRoutes
+import com.example.service.AppointmentService
 import io.ktor.server.application.*
 import io.ktor.server.routing.*
 import org.koin.ktor.ext.inject
 
 fun Application.configureRouting() {
-    val repo by inject<AppointmentRepository>()
+    val service by inject<AppointmentService>()
     routing {
-        appointmentRoutes(repo)
+        appointmentRoutes(service)
     }
 }
