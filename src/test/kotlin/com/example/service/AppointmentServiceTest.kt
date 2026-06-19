@@ -3,6 +3,7 @@ package com.example.service
 import com.example.external.NotificationClient
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.models.ReminderSummary
 import com.example.models.ServiceResult
 import com.example.repository.AppointmentRepository
 import io.mockk.*
@@ -176,6 +177,47 @@ class AppointmentServiceTest {
     fun `delete returns NotFound when record does not exist`() = runTest {
         coEvery { repo.delete(any()) } returns false
         assertEquals(ServiceResult.NotFound, service.delete("missing"))
+    }
+
+    // --- sendReminders ---
+
+    @Test
+    fun `sendReminders notifies every attendee and counts successes`() = runTest {
+        val appts = listOf(appointment("a1"), appointment("a2"), appointment("a3"))
+        coEvery { repo.findAll() } returns appts
+        coEvery { notificationClient.notify(any()) } just Runs
+
+        val result = service.sendReminders()
+
+        assertEquals(ServiceResult.Success(ReminderSummary(total = 3, sent = 3, failed = 0)), result)
+        coVerify(exactly = 3) { notificationClient.notify(any()) }
+    }
+
+    @Test
+    fun `sendReminders counts a failed notification without aborting the rest`() = runTest {
+        val ok1 = appointment("a1")
+        val bad = appointment("a2")
+        val ok2 = appointment("a3")
+        coEvery { repo.findAll() } returns listOf(ok1, bad, ok2)
+        coEvery { notificationClient.notify(ok1) } just Runs
+        coEvery { notificationClient.notify(ok2) } just Runs
+        coEvery { notificationClient.notify(bad) } throws RuntimeException("boom")
+
+        val result = service.sendReminders()
+
+        assertEquals(ServiceResult.Success(ReminderSummary(total = 3, sent = 2, failed = 1)), result)
+        coVerify(exactly = 1) { notificationClient.notify(ok1) }
+        coVerify(exactly = 1) { notificationClient.notify(ok2) }
+    }
+
+    @Test
+    fun `sendReminders returns an empty summary when there are no appointments`() = runTest {
+        coEvery { repo.findAll() } returns emptyList()
+
+        val result = service.sendReminders()
+
+        assertEquals(ServiceResult.Success(ReminderSummary(total = 0, sent = 0, failed = 0)), result)
+        coVerify(exactly = 0) { notificationClient.notify(any()) }
     }
 
     // --- helpers ---

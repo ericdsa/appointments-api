@@ -8,6 +8,7 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.launch
 
 fun Route.appointmentRoutes(service: AppointmentService) {
     route("/appointments") {
@@ -41,6 +42,25 @@ fun Route.appointmentRoutes(service: AppointmentService) {
                 is ServiceResult.Success -> call.respond(r.value)
                 else -> call.respondError(r)
             }
+        }
+
+        post("/reminders") {
+            // Fire-and-forget: launch the bulk notification on the application's
+            // scope so it outlives this request, then return 202 immediately
+            // instead of blocking the caller until every reminder is delivered.
+            // The caller never sees the outcome, so the background job logs the
+            // summary to keep a server-side record of what was delivered.
+            val log = call.application.log
+            call.application.launch {
+                when (val result = service.sendReminders()) {
+                    is ServiceResult.Success -> {
+                        val s = result.value
+                        log.info("Reminder dispatch finished: ${s.sent}/${s.total} sent, ${s.failed} failed")
+                    }
+                    else -> log.error("Reminder dispatch failed: $result")
+                }
+            }
+            call.respond(HttpStatusCode.Accepted, mapOf("status" to "reminders dispatching"))
         }
 
         post("/{id}/reschedule") {
