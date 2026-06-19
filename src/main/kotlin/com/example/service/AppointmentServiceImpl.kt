@@ -4,8 +4,12 @@ import com.example.db.AppointmentsTable
 import com.example.external.NotificationClient
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.models.ReminderSummary
 import com.example.models.ServiceResult
 import com.example.repository.AppointmentRepository
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -82,6 +86,25 @@ class AppointmentServiceImpl(
 
     override suspend fun delete(id: String): ServiceResult<Unit> =
         if (repo.delete(id)) ServiceResult.Success(Unit) else ServiceResult.NotFound
+
+    // Fans out one notification per appointment and waits for them all. Using a
+    // supervisorScope means a single attendee's failure is captured locally and
+    // does not cancel the sibling notifications; awaitAll then collects every
+    // outcome once the whole batch settles.
+    override suspend fun sendReminders(): ServiceResult<ReminderSummary> {
+        val appointments = repo.findAll()
+        val outcomes: List<Boolean> = supervisorScope {
+            appointments
+                .map { appointment ->
+                    async { runCatching { notificationClient.notify(appointment) }.isSuccess }
+                }
+                .awaitAll()
+        }
+        val sent = outcomes.count { it }
+        return ServiceResult.Success(
+            ReminderSummary(total = outcomes.size, sent = sent, failed = outcomes.size - sent)
+        )
+    }
 
     private suspend fun notifyThenWrap(appointment: Appointment): ServiceResult<Appointment> =
         try {

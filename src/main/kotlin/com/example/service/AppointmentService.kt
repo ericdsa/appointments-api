@@ -2,6 +2,7 @@ package com.example.service
 
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.models.ReminderSummary
 import com.example.models.ServiceResult
 
 interface AppointmentService {
@@ -15,4 +16,8 @@ interface AppointmentService {
     suspend fun reschedule(id: String, req: AppointmentRequest): ServiceResult<Appointment>
 
     suspend fun delete(id: String): ServiceResult<Unit>
+
+    // Sends a reminder to every appointment's attendee concurrently and reports
+    // how many succeeded. One failed notification does not abort the rest.
+    suspend fun sendReminders(): ServiceResult<ReminderSummary>
 }

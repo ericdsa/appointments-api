@@ -62,6 +62,11 @@ private class FakeAppointmentService : AppointmentService {
 
     override suspend fun delete(id: String) =
         if (store.remove(id) != null) ServiceResult.Success(Unit) else ServiceResult.NotFound
+
+    override suspend fun sendReminders(): ServiceResult<com.example.models.ReminderSummary> {
+        val total = store.size
+        return ServiceResult.Success(com.example.models.ReminderSummary(total, total, 0))
+    }
 }
 
 private fun ApplicationTestBuilder.setup() {
@@ -169,6 +174,13 @@ class AppointmentRoutesTest {
 
         val get = client.get("/appointments/$id") { apiKey() }
         assertEquals(HttpStatusCode.NotFound, get.status)
+    }
+
+    @Test
+    fun `POST reminders returns 202 Accepted`() = testApplication {
+        setup()
+        val response = client.post("/appointments/reminders") { apiKey() }
+        assertEquals(HttpStatusCode.Accepted, response.status)
     }
 
     @Test
