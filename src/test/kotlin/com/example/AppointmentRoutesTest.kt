@@ -2,6 +2,9 @@ package com.example
 
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
+import com.example.models.EnqueueSummary
+import com.example.models.Page
+import com.example.models.PageRequest
 import com.example.models.ServiceResult
 import com.example.plugins.ApiKeyAuth
 import com.example.plugins.configureRouting
@@ -27,6 +30,14 @@ private class FakeAppointmentService : AppointmentService {
     private val store = ConcurrentHashMap<String, Appointment>()
 
     override suspend fun getAll() = ServiceResult.Success(store.values.toList())
+
+    override suspend fun getPage(req: PageRequest): ServiceResult<Page<Appointment>> {
+        val all = store.values.sortedWith(compareBy({ it.scheduledAt }, { it.id }))
+        val items = all.drop((req.page - 1) * req.size).take(req.size)
+        val total = all.size.toLong()
+        val totalPages = if (total == 0L) 0L else (total + req.size - 1) / req.size
+        return ServiceResult.Success(Page(items, req.page, req.size, total, totalPages))
+    }
 
     override suspend fun getById(id: String) =
         store[id]?.let { ServiceResult.Success(it) } ?: ServiceResult.NotFound
@@ -63,10 +74,8 @@ private class FakeAppointmentService : AppointmentService {
     override suspend fun delete(id: String) =
         if (store.remove(id) != null) ServiceResult.Success(Unit) else ServiceResult.NotFound
 
-    override suspend fun sendReminders(): ServiceResult<com.example.models.ReminderSummary> {
-        val total = store.size
-        return ServiceResult.Success(com.example.models.ReminderSummary(total, total, 0))
-    }
+    override suspend fun enqueueReminders(): ServiceResult<EnqueueSummary> =
+        ServiceResult.Success(EnqueueSummary(enqueued = store.size))
 }
 
 private fun ApplicationTestBuilder.setup() {
@@ -86,11 +95,13 @@ private fun HttpRequestBuilder.apiKey() = header("X-Api-Key", TEST_API_KEY)
 class AppointmentRoutesTest {
 
     @Test
-    fun `GET appointments returns empty list initially`() = testApplication {
+    fun `GET appointments returns empty page initially`() = testApplication {
         setup()
         val response = client.get("/appointments") { apiKey() }
         assertEquals(HttpStatusCode.OK, response.status)
-        assertEquals("[]", response.bodyAsText().trim())
+        val body = response.bodyAsText()
+        assertContains(body, "\"items\": []")
+        assertContains(body, "\"total\": 0")
     }
 
     @Test

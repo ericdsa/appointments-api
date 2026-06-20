@@ -4,15 +4,16 @@ import com.example.db.AppointmentsTable
 import com.example.external.NotificationClient
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
-import com.example.models.ReminderSummary
+import com.example.models.EnqueueSummary
+import com.example.models.Page
+import com.example.models.PageRequest
 import com.example.models.ServiceResult
 import com.example.repository.AppointmentRepository
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.supervisorScope
+import com.example.repository.ReminderJobRepository
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
+import java.time.Instant
 import java.util.UUID
 
 // Wraps a block in a DB transaction. Injectable so unit tests can substitute a
@@ -23,12 +24,27 @@ interface TransactionRunner {
 
 class AppointmentServiceImpl(
     private val repo: AppointmentRepository,
+    private val reminderJobRepo: ReminderJobRepository,
     private val notificationClient: NotificationClient,
     private val tx: TransactionRunner,
 ) : AppointmentService {
 
     override suspend fun getAll(): ServiceResult<List<Appointment>> =
         ServiceResult.Success(repo.findAll())
+
+    override suspend fun getPage(req: PageRequest): ServiceResult<Page<Appointment>> {
+        if (req.page < 1) return ServiceResult.ValidationError("page must be >= 1")
+        if (req.size !in 1..PageRequest.MAX_SIZE)
+            return ServiceResult.ValidationError("size must be between 1 and ${PageRequest.MAX_SIZE}")
+
+        val offset = (req.page - 1).toLong() * req.size
+        val total = repo.count()
+        val items = repo.findPage(req.size, offset)
+        val totalPages = if (total == 0L) 0L else (total + req.size - 1) / req.size
+        return ServiceResult.Success(
+            Page(items = items, page = req.page, size = req.size, total = total, totalPages = totalPages)
+        )
+    }
 
     override suspend fun getById(id: String): ServiceResult<Appointment> =
         repo.findById(id)?.let { ServiceResult.Success(it) } ?: ServiceResult.NotFound
@@ -87,23 +103,15 @@ class AppointmentServiceImpl(
     override suspend fun delete(id: String): ServiceResult<Unit> =
         if (repo.delete(id)) ServiceResult.Success(Unit) else ServiceResult.NotFound
 
-    // Fans out one notification per appointment and waits for them all. Using a
-    // supervisorScope means a single attendee's failure is captured locally and
-    // does not cancel the sibling notifications; awaitAll then collects every
-    // outcome once the whole batch settles.
-    override suspend fun sendReminders(): ServiceResult<ReminderSummary> {
+    // Places one durable reminder job per appointment on the queue and returns
+    // immediately. The ReminderWorker drains the queue and performs the actual
+    // notification, so a crash mid-dispatch never loses reminders the way the old
+    // in-process fan-out did.
+    override suspend fun enqueueReminders(): ServiceResult<EnqueueSummary> {
         val appointments = repo.findAll()
-        val outcomes: List<Boolean> = supervisorScope {
-            appointments
-                .map { appointment ->
-                    async { runCatching { notificationClient.notify(appointment) }.isSuccess }
-                }
-                .awaitAll()
-        }
-        val sent = outcomes.count { it }
-        return ServiceResult.Success(
-            ReminderSummary(total = outcomes.size, sent = sent, failed = outcomes.size - sent)
-        )
+        val now = Instant.now().toString()
+        appointments.forEach { reminderJobRepo.enqueue(it.id, now) }
+        return ServiceResult.Success(EnqueueSummary(enqueued = appointments.size))
     }
 
     private suspend fun notifyThenWrap(appointment: Appointment): ServiceResult<Appointment> =

@@ -27,6 +27,22 @@ class ExposedAppointmentRepository(private val database: Database) : Appointment
         AppointmentsTable.selectAll().map { it.toAppointment() }
     }
 
+    // Stable ordering so paging is deterministic: scheduled_at is ISO-8601 text and
+    // therefore sorts chronologically, with id as a tie-breaker for equal instants.
+    override suspend fun findPage(limit: Int, offset: Long): List<Appointment> = query {
+        AppointmentsTable.selectAll()
+            .orderBy(
+                AppointmentsTable.scheduledAt to SortOrder.ASC,
+                AppointmentsTable.id to SortOrder.ASC,
+            )
+            .limit(limit, offset)
+            .map { it.toAppointment() }
+    }
+
+    override suspend fun count(): Long = query {
+        AppointmentsTable.selectAll().count()
+    }
+
     override suspend fun findById(id: String): Appointment? = query {
         AppointmentsTable.selectAll()
             .where { AppointmentsTable.id eq id }
