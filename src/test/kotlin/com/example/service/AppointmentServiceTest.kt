@@ -121,14 +121,14 @@ class AppointmentServiceTest {
     }
 
     @Test
-    fun `create returns ExternalApiError when notification fails`() = runTest {
+    fun `create still succeeds when notification fails after the write`() = runTest {
         val appt = appointment()
         coEvery { tx.execute<Appointment>(any()) } returns appt
         coEvery { notificationClient.notify(any()) } throws RuntimeException("timeout")
 
-        val result = service.create(validRequest())
-
-        assertIs<ServiceResult.ExternalApiError>(result)
+        // The row is already persisted; a failed notification must not surface as an
+        // error, or the client retries and creates a duplicate.
+        assertEquals(ServiceResult.Success(appt), service.create(validRequest()))
     }
 
     // --- update ---
@@ -158,14 +158,12 @@ class AppointmentServiceTest {
     }
 
     @Test
-    fun `update returns ExternalApiError when notification fails`() = runTest {
+    fun `update still succeeds when notification fails after the write`() = runTest {
         val appt = appointment()
         coEvery { repo.update(appt.id, any()) } returns appt
         coEvery { notificationClient.notify(any()) } throws RuntimeException("timeout")
 
-        val result = service.update(appt.id, validRequest())
-
-        assertIs<ServiceResult.ExternalApiError>(result)
+        assertEquals(ServiceResult.Success(appt), service.update(appt.id, validRequest()))
     }
 
     // --- reschedule ---
@@ -177,32 +175,32 @@ class AppointmentServiceTest {
     }
 
     @Test
-    fun `reschedule returns NotFound when tx block finds no record`() = runTest {
-        coEvery { tx.execute<Appointment?>(any()) } returns null
+    fun `reschedule returns NotFound when repo finds no record`() = runTest {
+        coEvery { repo.update(any(), any()) } returns null
         assertEquals(ServiceResult.NotFound, service.reschedule("missing", validRequest()))
     }
 
     @Test
-    fun `reschedule returns Success and sends notification`() = runTest {
+    fun `reschedule updates in place preserving id and sends notification`() = runTest {
         val appt = appointment()
-        coEvery { tx.execute<Appointment?>(any()) } returns appt
+        coEvery { repo.update(appt.id, any()) } returns appt
         coEvery { notificationClient.notify(appt) } just Runs
 
         val result = service.reschedule(appt.id, validRequest())
 
+        // Same id is returned: reschedule is an in-place update, not a re-create.
         assertEquals(ServiceResult.Success(appt), result)
+        coVerify(exactly = 1) { repo.update(appt.id, any()) }
         coVerify(exactly = 1) { notificationClient.notify(appt) }
     }
 
     @Test
-    fun `reschedule returns ExternalApiError when notification fails`() = runTest {
+    fun `reschedule still succeeds when notification fails after the write`() = runTest {
         val appt = appointment()
-        coEvery { tx.execute<Appointment?>(any()) } returns appt
+        coEvery { repo.update(appt.id, any()) } returns appt
         coEvery { notificationClient.notify(any()) } throws RuntimeException("network error")
 
-        val result = service.reschedule(appt.id, validRequest())
-
-        assertIs<ServiceResult.ExternalApiError>(result)
+        assertEquals(ServiceResult.Success(appt), service.reschedule(appt.id, validRequest()))
     }
 
     // --- delete ---
@@ -222,29 +220,26 @@ class AppointmentServiceTest {
     // --- enqueueReminders ---
 
     @Test
-    fun `enqueueReminders enqueues one job per appointment and counts them`() = runTest {
-        val appts = listOf(appointment("a1"), appointment("a2"), appointment("a3"))
-        coEvery { repo.findAll() } returns appts
-        coEvery { reminderJobRepo.enqueue(any(), any()) } returns mockk()
+    fun `enqueueReminders reports the count from the set-based enqueue and dispatches nothing`() = runTest {
+        coEvery { reminderJobRepo.enqueueDueForUpcoming(any()) } returns 3
 
         val result = service.enqueueReminders()
 
         assertEquals(ServiceResult.Success(EnqueueSummary(enqueued = 3)), result)
-        coVerify(exactly = 1) { reminderJobRepo.enqueue("a1", any()) }
-        coVerify(exactly = 1) { reminderJobRepo.enqueue("a2", any()) }
-        coVerify(exactly = 1) { reminderJobRepo.enqueue("a3", any()) }
-        // Dispatch is the worker's job now, not the service's.
+        coVerify(exactly = 1) { reminderJobRepo.enqueueDueForUpcoming(any()) }
+        // The service no longer reads the appointments table itself...
+        coVerify(exactly = 0) { repo.findAll() }
+        // ...and dispatch is the worker's job, not the service's.
         coVerify(exactly = 0) { notificationClient.notify(any()) }
     }
 
     @Test
-    fun `enqueueReminders returns zero when there are no appointments`() = runTest {
-        coEvery { repo.findAll() } returns emptyList()
+    fun `enqueueReminders returns zero when nothing was enqueued`() = runTest {
+        coEvery { reminderJobRepo.enqueueDueForUpcoming(any()) } returns 0
 
         val result = service.enqueueReminders()
 
         assertEquals(ServiceResult.Success(EnqueueSummary(enqueued = 0)), result)
-        coVerify(exactly = 0) { reminderJobRepo.enqueue(any(), any()) }
     }
 
     // --- helpers ---

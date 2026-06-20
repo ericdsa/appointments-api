@@ -10,9 +10,8 @@ import com.example.models.PageRequest
 import com.example.models.ServiceResult
 import com.example.repository.AppointmentRepository
 import com.example.repository.ReminderJobRepository
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
+import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.util.UUID
 
@@ -28,6 +27,8 @@ class AppointmentServiceImpl(
     private val notificationClient: NotificationClient,
     private val tx: TransactionRunner,
 ) : AppointmentService {
+
+    private val log = LoggerFactory.getLogger(AppointmentServiceImpl::class.java)
 
     override suspend fun getAll(): ServiceResult<List<Appointment>> =
         ServiceResult.Success(repo.findAll())
@@ -76,49 +77,41 @@ class AppointmentServiceImpl(
         return notifyThenWrap(updated)
     }
 
-    // Deletes the existing record and inserts the replacement in one transaction,
-    // so a crash mid-way cannot leave the attendee with zero appointments.
+    // Updates the appointment in place, preserving its id. An in-place UPDATE is
+    // atomic on its own, so there is no window where the appointment is missing,
+    // and (unlike a delete + re-insert) it keeps the id stable and leaves the
+    // appointment's queued reminder_jobs — which FK to it — intact.
     override suspend fun reschedule(id: String, req: AppointmentRequest): ServiceResult<Appointment> {
         try { req.validate() } catch (e: IllegalArgumentException) {
             return ServiceResult.ValidationError(e.message ?: "Invalid request")
         }
-        val newId = UUID.randomUUID().toString()
-        val rescheduled = tx.execute<Appointment?> {
-            val deleted = AppointmentsTable.deleteWhere { AppointmentsTable.id eq id }
-            if (deleted == 0) return@execute null
-            AppointmentsTable.insert {
-                it[AppointmentsTable.id] = newId
-                it[title] = req.title
-                it[description] = req.description
-                it[scheduledAt] = req.scheduledAt
-                it[durationMinutes] = req.durationMinutes
-                it[attendee] = req.attendee
-            }
-            Appointment(newId, req.title, req.description, req.scheduledAt, req.durationMinutes, req.attendee)
-        } ?: return ServiceResult.NotFound
-
+        val rescheduled = repo.update(id, req) ?: return ServiceResult.NotFound
         return notifyThenWrap(rescheduled)
     }
 
     override suspend fun delete(id: String): ServiceResult<Unit> =
         if (repo.delete(id)) ServiceResult.Success(Unit) else ServiceResult.NotFound
 
-    // Places one durable reminder job per appointment on the queue and returns
-    // immediately. The ReminderWorker drains the queue and performs the actual
-    // notification, so a crash mid-dispatch never loses reminders the way the old
-    // in-process fan-out did.
+    // Durably enqueues a reminder for every upcoming appointment in one set-based
+    // statement and returns immediately; the ReminderWorker drains the queue and
+    // sends the notifications. Idempotent (skips appointments with an in-flight job)
+    // and bounded — it never loads the table into memory the way the old per-row
+    // fan-out did.
     override suspend fun enqueueReminders(): ServiceResult<EnqueueSummary> {
-        val appointments = repo.findAll()
-        val now = Instant.now().toString()
-        appointments.forEach { reminderJobRepo.enqueue(it.id, now) }
-        return ServiceResult.Success(EnqueueSummary(enqueued = appointments.size))
+        val enqueued = reminderJobRepo.enqueueDueForUpcoming(Instant.now().toString())
+        return ServiceResult.Success(EnqueueSummary(enqueued = enqueued))
     }
 
-    private suspend fun notifyThenWrap(appointment: Appointment): ServiceResult<Appointment> =
+    // The appointment is already persisted by the time we get here, so a failed
+    // notification must not fail the write — otherwise the client sees an error for
+    // a record that exists and retries, creating duplicates. Notification is a
+    // best-effort side effect: log the failure and still return the saved record.
+    private suspend fun notifyThenWrap(appointment: Appointment): ServiceResult<Appointment> {
         try {
             notificationClient.notify(appointment)
-            ServiceResult.Success(appointment)
         } catch (e: Exception) {
-            ServiceResult.ExternalApiError("Notification failed: ${e.message}")
+            log.warn("Notification failed for appointment ${appointment.id}; write succeeded", e)
         }
+        return ServiceResult.Success(appointment)
+    }
 }

@@ -115,7 +115,9 @@ class AppointmentRepositoryIntegrationTest {
         val notYet = jobs.enqueue(appt.id, future)
 
         val now = Instant.now().toString()
-        val claimed = jobs.claimBatch(now, limit = 10)
+        // staleBefore far in the past so no PROCESSING row is treated as orphaned here.
+        val notStale = Instant.parse("1970-01-01T00:00:00Z").toString()
+        val claimed = jobs.claimBatch(now, notStale, limit = 10)
 
         val claimedIds = claimed.map { it.id }.toSet()
         assertEquals(setOf(due1.id, due2.id), claimedIds)
@@ -123,10 +125,27 @@ class AppointmentRepositoryIntegrationTest {
         assertTrue(claimed.all { it.status == ReminderJobStatus.PROCESSING })
 
         // Already claimed -> a second poll finds nothing new.
-        assertTrue(jobs.claimBatch(now, limit = 10).isEmpty())
+        assertTrue(jobs.claimBatch(now, notStale, limit = 10).isEmpty())
 
         jobs.markDone(due1.id)
         assertEquals(ReminderJobStatus.DONE, statusOf(due1.id))
+    }
+
+    @Test
+    fun `claimBatch reclaims a PROCESSING job whose lock has gone stale`() = runBlocking {
+        val appt = appointments.create(request(scheduledAt = "2026-09-01T10:00:00Z"))
+        val job = jobs.enqueue(appt.id, Instant.parse("2020-01-01T00:00:00Z").toString())
+
+        // First claim moves it to PROCESSING with a fresh lock.
+        val now = Instant.now().toString()
+        val recent = Instant.parse("1970-01-01T00:00:00Z").toString()
+        assertEquals(setOf(job.id), jobs.claimBatch(now, recent, limit = 10).map { it.id }.toSet())
+
+        // With a staleBefore in the future, the still-PROCESSING row counts as
+        // orphaned and is reclaimed; with one in the past it is left alone.
+        val future = Instant.parse("2999-01-01T00:00:00Z").toString()
+        assertEquals(setOf(job.id), jobs.claimBatch(now, future, limit = 10).map { it.id }.toSet())
+        assertTrue(jobs.claimBatch(now, recent, limit = 10).isEmpty())
     }
 
     @Test
@@ -151,6 +170,31 @@ class AppointmentRepositoryIntegrationTest {
         }
 
         assertEquals(ReminderJobStatus.DONE, statusOf(job.id))
+    }
+
+    @Test
+    fun `enqueueDueForUpcoming enqueues only upcoming appointments and is idempotent`() = runBlocking {
+        val now = Instant.now()
+        val past = appointments.create(request(scheduledAt = now.minusSeconds(3600).toString()))
+        val upcoming = appointments.create(request(scheduledAt = now.plusSeconds(3600).toString()))
+
+        val enqueued = jobs.enqueueDueForUpcoming(now.toString())
+
+        assertEquals(1, enqueued)
+        assertEquals(1, jobCountFor(upcoming.id))
+        assertEquals(0, jobCountFor(past.id)) // past appointment gets no reminder
+
+        // Second call: the upcoming appointment already has an in-flight PENDING job,
+        // so it is skipped and nothing new is enqueued.
+        assertEquals(0, jobs.enqueueDueForUpcoming(now.toString()))
+        assertEquals(1, jobCountFor(upcoming.id))
+    }
+
+    private fun jobCountFor(appointmentId: String): Int = transaction(database) {
+        ReminderJobsTable.selectAll()
+            .where { ReminderJobsTable.appointmentId eq appointmentId }
+            .count()
+            .toInt()
     }
 
     private fun statusOf(jobId: String): ReminderJobStatus = transaction(database) {
