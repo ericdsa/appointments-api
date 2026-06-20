@@ -5,6 +5,7 @@ import com.example.repository.AppointmentRepository
 import com.example.repository.ReminderJobRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -23,6 +24,9 @@ class ReminderWorker(
     private val pollMs: Long = 1_000,
     private val batchSize: Int = 20,
     private val maxAttempts: Int = 3,
+    // A PROCESSING job whose lock is older than this is treated as orphaned (its
+    // worker died) and reclaimed by the next poll.
+    private val staleLockMs: Long = 5 * 60 * 1_000,
 ) {
     private val log = LoggerFactory.getLogger(ReminderWorker::class.java)
     private var loop: Job? = null
@@ -42,12 +46,19 @@ class ReminderWorker(
     }
 
     suspend fun stop() {
-        loop?.cancel()
+        // Join so we don't return while a job is mid-send: an abandoned PROCESSING
+        // row would otherwise sit until the staleness reaper picks it up.
+        loop?.cancelAndJoin()
         loop = null
     }
 
     private suspend fun drainOnce(): Int {
-        val jobs = reminderJobRepo.claimBatch(Instant.now().toString(), batchSize)
+        val now = Instant.now()
+        val jobs = reminderJobRepo.claimBatch(
+            now = now.toString(),
+            staleBefore = now.minusMillis(staleLockMs).toString(),
+            limit = batchSize,
+        )
         for (job in jobs) {
             val appointment = appointmentRepo.findById(job.appointmentId)
             if (appointment == null) {
