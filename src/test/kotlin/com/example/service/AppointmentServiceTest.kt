@@ -3,9 +3,11 @@ package com.example.service
 import com.example.external.NotificationClient
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
-import com.example.models.ReminderSummary
+import com.example.models.EnqueueSummary
+import com.example.models.PageRequest
 import com.example.models.ServiceResult
 import com.example.repository.AppointmentRepository
+import com.example.repository.ReminderJobRepository
 import io.mockk.*
 import io.mockk.impl.annotations.MockK
 import kotlinx.coroutines.test.runTest
@@ -17,6 +19,7 @@ import kotlin.test.assertEquals
 class AppointmentServiceTest {
 
     @MockK lateinit var repo: AppointmentRepository
+    @MockK lateinit var reminderJobRepo: ReminderJobRepository
     @MockK lateinit var notificationClient: NotificationClient
     @MockK lateinit var tx: TransactionRunner
 
@@ -25,7 +28,44 @@ class AppointmentServiceTest {
     @BeforeEach
     fun setUp() {
         MockKAnnotations.init(this)
-        service = AppointmentServiceImpl(repo, notificationClient, tx)
+        service = AppointmentServiceImpl(repo, reminderJobRepo, notificationClient, tx)
+    }
+
+    // --- getPage ---
+
+    @Test
+    fun `getPage returns a populated page with computed totalPages`() = runTest {
+        val items = listOf(appointment("a1"), appointment("a2"))
+        coEvery { repo.count() } returns 5
+        coEvery { repo.findPage(2, 0) } returns items
+
+        val result = service.getPage(PageRequest(page = 1, size = 2))
+
+        val page = assertIs<ServiceResult.Success<com.example.models.Page<Appointment>>>(result).value
+        assertEquals(items, page.items)
+        assertEquals(5, page.total)
+        assertEquals(3, page.totalPages) // ceil(5 / 2)
+    }
+
+    @Test
+    fun `getPage computes offset from page and size`() = runTest {
+        coEvery { repo.count() } returns 25
+        coEvery { repo.findPage(10, 20) } returns emptyList()
+
+        service.getPage(PageRequest(page = 3, size = 10))
+
+        coVerify(exactly = 1) { repo.findPage(10, 20) }
+    }
+
+    @Test
+    fun `getPage returns ValidationError for page below 1`() = runTest {
+        assertIs<ServiceResult.ValidationError>(service.getPage(PageRequest(page = 0, size = 10)))
+    }
+
+    @Test
+    fun `getPage returns ValidationError for size above the max`() = runTest {
+        val tooBig = PageRequest.MAX_SIZE + 1
+        assertIs<ServiceResult.ValidationError>(service.getPage(PageRequest(page = 1, size = tooBig)))
     }
 
     // --- getAll ---
@@ -179,45 +219,32 @@ class AppointmentServiceTest {
         assertEquals(ServiceResult.NotFound, service.delete("missing"))
     }
 
-    // --- sendReminders ---
+    // --- enqueueReminders ---
 
     @Test
-    fun `sendReminders notifies every attendee and counts successes`() = runTest {
+    fun `enqueueReminders enqueues one job per appointment and counts them`() = runTest {
         val appts = listOf(appointment("a1"), appointment("a2"), appointment("a3"))
         coEvery { repo.findAll() } returns appts
-        coEvery { notificationClient.notify(any()) } just Runs
+        coEvery { reminderJobRepo.enqueue(any(), any()) } returns mockk()
 
-        val result = service.sendReminders()
+        val result = service.enqueueReminders()
 
-        assertEquals(ServiceResult.Success(ReminderSummary(total = 3, sent = 3, failed = 0)), result)
-        coVerify(exactly = 3) { notificationClient.notify(any()) }
+        assertEquals(ServiceResult.Success(EnqueueSummary(enqueued = 3)), result)
+        coVerify(exactly = 1) { reminderJobRepo.enqueue("a1", any()) }
+        coVerify(exactly = 1) { reminderJobRepo.enqueue("a2", any()) }
+        coVerify(exactly = 1) { reminderJobRepo.enqueue("a3", any()) }
+        // Dispatch is the worker's job now, not the service's.
+        coVerify(exactly = 0) { notificationClient.notify(any()) }
     }
 
     @Test
-    fun `sendReminders counts a failed notification without aborting the rest`() = runTest {
-        val ok1 = appointment("a1")
-        val bad = appointment("a2")
-        val ok2 = appointment("a3")
-        coEvery { repo.findAll() } returns listOf(ok1, bad, ok2)
-        coEvery { notificationClient.notify(ok1) } just Runs
-        coEvery { notificationClient.notify(ok2) } just Runs
-        coEvery { notificationClient.notify(bad) } throws RuntimeException("boom")
-
-        val result = service.sendReminders()
-
-        assertEquals(ServiceResult.Success(ReminderSummary(total = 3, sent = 2, failed = 1)), result)
-        coVerify(exactly = 1) { notificationClient.notify(ok1) }
-        coVerify(exactly = 1) { notificationClient.notify(ok2) }
-    }
-
-    @Test
-    fun `sendReminders returns an empty summary when there are no appointments`() = runTest {
+    fun `enqueueReminders returns zero when there are no appointments`() = runTest {
         coEvery { repo.findAll() } returns emptyList()
 
-        val result = service.sendReminders()
+        val result = service.enqueueReminders()
 
-        assertEquals(ServiceResult.Success(ReminderSummary(total = 0, sent = 0, failed = 0)), result)
-        coVerify(exactly = 0) { notificationClient.notify(any()) }
+        assertEquals(ServiceResult.Success(EnqueueSummary(enqueued = 0)), result)
+        coVerify(exactly = 0) { reminderJobRepo.enqueue(any(), any()) }
     }
 
     // --- helpers ---

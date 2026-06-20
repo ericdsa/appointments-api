@@ -1,6 +1,7 @@
 package com.example.routes
 
 import com.example.models.AppointmentRequest
+import com.example.models.PageRequest
 import com.example.models.ServiceResult
 import com.example.service.AppointmentService
 import io.ktor.http.*
@@ -8,12 +9,11 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.coroutines.launch
 
 fun Route.appointmentRoutes(service: AppointmentService) {
     route("/appointments") {
         get {
-            when (val r = service.getAll()) {
+            when (val r = service.getPage(call.request.queryParameters.pageRequest())) {
                 is ServiceResult.Success -> call.respond(r.value)
                 else -> call.respondError(r)
             }
@@ -45,22 +45,14 @@ fun Route.appointmentRoutes(service: AppointmentService) {
         }
 
         post("/reminders") {
-            // Fire-and-forget: launch the bulk notification on the application's
-            // scope so it outlives this request, then return 202 immediately
-            // instead of blocking the caller until every reminder is delivered.
-            // The caller never sees the outcome, so the background job logs the
-            // summary to keep a server-side record of what was delivered.
-            val log = call.application.log
-            call.application.launch {
-                when (val result = service.sendReminders()) {
-                    is ServiceResult.Success -> {
-                        val s = result.value
-                        log.info("Reminder dispatch finished: ${s.sent}/${s.total} sent, ${s.failed} failed")
-                    }
-                    else -> log.error("Reminder dispatch failed: $result")
-                }
+            // Durably enqueue one reminder job per appointment and return 202
+            // immediately. A background worker drains the queue and performs the
+            // notifications, so the work survives a restart instead of being lost
+            // with an in-process fire-and-forget coroutine.
+            when (val r = service.enqueueReminders()) {
+                is ServiceResult.Success -> call.respond(HttpStatusCode.Accepted, r.value)
+                else -> call.respondError(r)
             }
-            call.respond(HttpStatusCode.Accepted, mapOf("status" to "reminders dispatching"))
         }
 
         post("/{id}/reschedule") {
@@ -84,6 +76,15 @@ fun Route.appointmentRoutes(service: AppointmentService) {
         }
     }
 }
+
+// Parses ?page= and ?size= with sane defaults. Out-of-range or non-numeric values
+// fall back to the defaults here; the service enforces the hard bounds and returns
+// a ValidationError for anything it rejects.
+private fun Parameters.pageRequest(): PageRequest =
+    PageRequest(
+        page = this["page"]?.toIntOrNull() ?: PageRequest.DEFAULT_PAGE,
+        size = this["size"]?.toIntOrNull() ?: PageRequest.DEFAULT_SIZE,
+    )
 
 private suspend fun ApplicationCall.respondError(result: ServiceResult<*>) {
     when (result) {

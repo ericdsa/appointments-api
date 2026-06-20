@@ -2,11 +2,14 @@ package com.example.service
 
 import com.example.models.Appointment
 import com.example.models.AppointmentRequest
-import com.example.models.ReminderSummary
+import com.example.models.EnqueueSummary
+import com.example.models.Page
+import com.example.models.PageRequest
 import com.example.models.ServiceResult
 
 interface AppointmentService {
     suspend fun getAll(): ServiceResult<List<Appointment>>
+    suspend fun getPage(req: PageRequest): ServiceResult<Page<Appointment>>
     suspend fun getById(id: String): ServiceResult<Appointment>
     suspend fun create(req: AppointmentRequest): ServiceResult<Appointment>
     suspend fun update(id: String, req: AppointmentRequest): ServiceResult<Appointment>
@@ -17,7 +20,8 @@ interface AppointmentService {
 
     suspend fun delete(id: String): ServiceResult<Unit>
 
-    // Sends a reminder to every appointment's attendee concurrently and reports
-    // how many succeeded. One failed notification does not abort the rest.
-    suspend fun sendReminders(): ServiceResult<ReminderSummary>
+    // Enqueues a durable reminder job per appointment and reports how many were
+    // queued. A background worker drains the queue and performs the actual
+    // notification, so dispatch survives restarts.
+    suspend fun enqueueReminders(): ServiceResult<EnqueueSummary>
 }
